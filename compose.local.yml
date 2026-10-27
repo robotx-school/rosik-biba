@@ -1,0 +1,8 @@
+services:
+  server:
+    build:
+      dockerfile: Dockerfile.offline
+      network: host
+      args:
+        HTTP_PROXY: ${HTTP_PROXY}
+        HTTPS_PROXY: ${HTTPS_PROXY}

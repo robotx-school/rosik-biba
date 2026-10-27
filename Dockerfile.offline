@@ -1,0 +1,20 @@
+FROM scratch
+
+ADD dist/alpine-rootfs.tar /
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+RUN apk add --no-cache \
+    ca-certificates \
+    tzdata \
+    curl \
+    && addgroup -S bibika \
+    && adduser -S bibika -G bibika
+
+WORKDIR /app
+COPY --chown=bibika:bibika dist/bibika-server /app/bibika-server
+
+USER bibika
+EXPOSE 31415/tcp
+EXPOSE 31415/udp
+ENTRYPOINT ["/app/bibika-server"]

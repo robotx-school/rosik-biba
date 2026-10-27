@@ -1,0 +1,10 @@
+.git
+.github
+.env
+.env.*
+*.log
+coverage
+tmp
+bin
+bibika-server
+bibika-agent

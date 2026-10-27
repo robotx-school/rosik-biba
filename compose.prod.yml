@@ -1,0 +1,25 @@
+services:
+  server:
+    image: ${BIBIKA_IMAGE:-bibika-server:latest}
+    environment:
+      BIBIKA_LISTEN: ":31415"
+      BIBIKA_AGENT_TOKEN: ${BIBIKA_AGENT_TOKEN:?BIBIKA_AGENT_TOKEN is required}
+      BIBIKA_ROBOT_ID: ${BIBIKA_ROBOT_ID:-default}
+      BIBIKA_PUBLIC_IP: ${BIBIKA_PUBLIC_IP:?BIBIKA_PUBLIC_IP is required}
+      BIBIKA_ICE_UDP_PORT: "31415"
+    ports:
+      - "31415:31415/tcp"
+      - "31415:31415/udp"
+    networks:
+      - bibika-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:31415/ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+networks:
+  bibika-net:
+    driver: bridge
