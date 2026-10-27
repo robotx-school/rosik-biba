@@ -1,76 +1,21 @@
-# Bibika Robot Relay
+# Rosik Biba robot control
 
-The project runs as two separate Go binaries:
+Two robot ESP32s connect independently to the Raspberry Pi:
 
-```text
-Browser UI -- HTTPS/WSS --> Public server <-- outbound WSS -- Robot agent
-                                  ^
-                                  | WebRTC video relay
-                                  +-- Agent camera publisher and browser viewers
-```
+- **[driver/](driver/README.md)** — the existing driving website, Go server/agent, camera stream and deployment files. Relocated together without changing their contents. Run its original commands from `driver/`.
+- **[manipulator/](manipulator/README.md)** — Go operator controller and RPi manipulator receiver, replacing the Python serial controller and forwarding calibrated poses and lift commands.
+- **[firmware/](firmware/README.md)** — original motor bridge and combined servo/stepper ESP32 firmware, wiring defaults, commissioning and build instructions.
+- **[docs/architecture.md](docs/architecture.md)** — component and protocol reference.
 
-The robot agent is the only process that accesses the serial device and camera. It makes an outbound connection to the public server, so the server never opens a connection to the robot.
+The website and manipulator receiver run as separate processes on the RPi. You supply the network addresses and manage the tailnet/local network. This repository does not configure networking.
 
-## Build
+## Build Go programs
 
 ```sh
-go build -o bibika-server .
-go build -o bibika-agent ./cmd/agent
+(cd driver && go build -o /tmp/bibika-server . && go build -o /tmp/bibika-agent ./cmd/agent)
+(cd manipulator && go build -o /tmp/manipulator-receiver ./cmd/receiver && go build -o /tmp/manipulator-controller ./cmd/controller)
 ```
 
-## Run the public server
+The motor and manipulator must use different serial devices. Prefer stable `/dev/serial/by-id/...` paths.
 
-```sh
-export BIBIKA_AGENT_TOKEN='replace-with-a-long-random-secret'
-export BIBIKA_LISTEN=':8067'             # optional
-export BIBIKA_ROBOT_ID='default'          # optional
-./bibika-server
-```
-
-Serve the public endpoint over HTTPS in production. The server must be publicly reachable over TCP for HTTPS/WSS and UDP for WebRTC media.
-
-WebRTC media is bound to UDP `31415`. Forward both TCP and UDP `31415` from the public address to the server host.
-
-### TURN relay
-
-STUN discovers addresses but never relays video. For video to work when the robot is on a different or restrictive network, run a publicly reachable TURN server and set these variables on both the server and robot agent:
-
-```sh
-export BIBIKA_ICE_URLS='turn:turn.example.com:3478?transport=udp'
-export BIBIKA_ICE_USERNAME='bibika'
-export BIBIKA_ICE_CREDENTIAL='replace-with-a-long-random-secret'
-export BIBIKA_ICE_TRANSPORT_POLICY='relay'
-```
-
-`relay` forces both WebRTC legs through TURN: robot → TURN → server → TURN → browser. The TURN host needs TCP/UDP 3478 and its configured UDP relay range open to the Internet. It must use a public address or DNS name; `192.168.0.66` can only work for devices on that LAN.
-
-## Run the robot agent
-
-```sh
-export BIBIKA_SERVER_URL='wss://robot.example.com/agent/connect'
-export BIBIKA_AGENT_TOKEN='replace-with-the-same-secret'
-export BIBIKA_ROBOT_ID='default'
-export BIBIKA_SERIAL='/dev/ttyUSB1'       # optional
-export BIBIKA_BAUD='115200'               # optional
-export BIBIKA_VIDEO='/dev/video0'         # optional
-export BIBIKA_VIDEO_WIDTH='1280'          # optional
-export BIBIKA_VIDEO_HEIGHT='720'          # optional
-export BIBIKA_VIDEO_FPS='30'              # optional
-./bibika-agent
-```
-
-The agent reconnects automatically after a network failure. It clamps all motion values locally and sends a zero command when it has not received a fresh server command for 250 ms.
-
-## Protocol
-
-The agent first sends an authenticated `hello` message over its outbound WebSocket. The server then forwards browser control messages to that connection and broadcasts agent status to browser control sessions.
-
-Camera media is not sent through the control WebSocket. The agent publishes a VP8 WebRTC track to the server, and the server relays RTP packets to each browser WebRTC viewer.
-
-## Operational Requirements
-
-- Install `ffmpeg` with `libvpx` support on the robot.
-- Grant the agent account access to the serial and V4L2 devices.
-- Use the same non-empty `BIBIKA_AGENT_TOKEN` on both processes.
-- Put the public server behind TLS; the browser automatically selects `wss://` when loaded through HTTPS.
-- The current UI has no user authentication. Do not expose it to untrusted networks until browser authentication and per-robot authorization are added.
+The implementation was compiled for ESP32 Dev Module. Physical pin assignments, limit switch polarity, usable lift travel and servo calibration must match your hardware before use. No firmware has been uploaded and no robot movement has been performed.

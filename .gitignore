@@ -2,3 +2,6 @@ sss.json
 .env
 .playwright-mcp
 dist
+# Local manipulator builds and downloaded firmware libraries
+manipulator/bin/
+firmware/.deps/
