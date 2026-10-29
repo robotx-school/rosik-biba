@@ -55,3 +55,40 @@ func newTestDevice(port io.ReadWriteCloser) *Device {
 	d.port = port
 	return d
 }
+
+// USB drivers can block even Close while draining an unresponsive device.
+// Requests must return on time and quarantine that device until cleanup ends.
+func TestDeadlineReturnsWhileDriverCloseIsBlocked(t *testing.T) {
+	client, robot := net.Pipe()
+	defer robot.Close()
+	release := make(chan struct{})
+	port := &blockedClosePort{Conn: client, release: release}
+	d := newTestDevice(port)
+	go func() { _, _ = ReadPacket(robot) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := d.Execute(ctx, Command{Action: "enable"}); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("missing deadline error")
+		}
+	case <-time.After(200 * time.Millisecond):
+		close(release)
+		<-done
+		t.Fatal("request blocked on USB driver close")
+	}
+	_, err := d.Execute(context.Background(), Command{Action: "status"})
+	if err == nil {
+		t.Fatal("reopened a serial port while prior close is pending")
+	}
+	close(release)
+}
+
+type blockedClosePort struct {
+	net.Conn
+	release <-chan struct{}
+}
+
+func (p *blockedClosePort) Close() error { <-p.release; return p.Conn.Close() }

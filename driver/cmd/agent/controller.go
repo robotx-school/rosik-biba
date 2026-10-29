@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -12,22 +11,27 @@ import (
 )
 
 const (
-	serialRate     = 20 * time.Millisecond
-	commandTimeout = 250 * time.Millisecond
+	serialRate      = 20 * time.Millisecond
+	commandTimeout  = 250 * time.Millisecond
+	feedbackTimeout = 500 * time.Millisecond
 )
 
 type controllerStatus struct {
+	powerStatus     string
 	serialConnected bool
 	lastFeedback    string
 }
 
 type controller struct {
+	power           powerControl
 	mu              sync.Mutex
 	linear          float64
 	angular         float64
 	lastCommand     time.Time
 	serialConnected bool
 	lastFeedback    string
+	lastReportAt    time.Time
+	feedbackHealthy bool
 }
 
 func newController() *controller {
@@ -58,7 +62,25 @@ func (c *controller) command() (float64, float64) {
 func (c *controller) status() controllerStatus {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return controllerStatus{serialConnected: c.serialConnected, lastFeedback: c.lastFeedback}
+	c.refreshPowerLocked(time.Now())
+	healthy := c.serialHealthyLocked(time.Now())
+	if healthy != c.feedbackHealthy {
+		c.feedbackHealthy = healthy
+		if healthy {
+			slog.Info("motor ESP32 feedback received")
+		} else {
+			slog.Warn("motor ESP32 feedback stale or unavailable")
+		}
+	}
+	powerStatus := c.power.status
+	if powerStatus == "" {
+		powerStatus = "unknown"
+	}
+	return controllerStatus{serialConnected: healthy, lastFeedback: c.lastFeedback, powerStatus: powerStatus}
+}
+
+func (c *controller) serialHealthyLocked(now time.Time) bool {
+	return c.serialConnected && !c.lastReportAt.IsZero() && now.Sub(c.lastReportAt) <= feedbackTimeout
 }
 
 func (c *controller) serialLoop(portName string, baud int) {
@@ -74,42 +96,69 @@ func (c *controller) serialLoop(portName string, baud int) {
 		slog.Info("serial connected", "port", portName, "baud", baud)
 		c.setSerial(true)
 		done := make(chan struct{})
-		go c.readSerial(port, done)
+		readerStop := make(chan struct{})
+		go c.readSerial(port, done, readerStop)
 
 		ticker := time.NewTicker(serialRate)
-		for range ticker.C {
-			linear, angular := c.command()
-			if _, err := fmt.Fprintf(port, "%.4f %.4f\n", linear, angular); err != nil {
-				slog.Warn("serial write failed", "error", err)
-				break
+	serialWriteLoop:
+		for {
+			select {
+			case <-done:
+				slog.Warn("serial feedback reader stopped; reopening port", "port", portName)
+				break serialWriteLoop
+			case <-ticker.C:
+				if err := c.writeSerialTick(port); err != nil {
+					slog.Warn("serial write failed", "error", err)
+					break serialWriteLoop
+				}
 			}
 		}
 		ticker.Stop()
-		_ = port.Close()
-		<-done
-		c.setSerial(false)
+		closed := c.retireSerial(port, done, readerStop)
+		select {
+		case <-closed:
+		case <-time.After(time.Second):
+			slog.Warn("serial device offline; USB driver cleanup is still pending", "port", portName)
+			<-closed
+		}
 		time.Sleep(500 * time.Millisecond)
 	}
 }
 
 func (c *controller) setSerial(connected bool) {
 	c.mu.Lock()
+	if connected != c.serialConnected {
+		c.lastReportAt = time.Time{}
+		c.lastFeedback = ""
+		c.power.pendingAt = time.Time{}
+		c.power.deadline = time.Time{}
+		if connected {
+			c.power.status = "unknown"
+		} else {
+			c.power.status = "offline"
+		}
+	}
 	c.serialConnected = connected
 	c.mu.Unlock()
 }
 
-func (c *controller) readSerial(port *serial.Port, done chan<- struct{}) {
+func (c *controller) readSerial(port *serial.Port, done chan<- struct{}, stop <-chan struct{}) {
 	defer close(done)
-	scanner := bufio.NewScanner(port)
+	scanner := bufio.NewScanner(serialFeedbackReader{Reader: port, stop: stop})
 	scanner.Buffer(make([]byte, 1024), 256*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
-		c.mu.Lock()
-		c.lastFeedback = line
-		c.mu.Unlock()
+		c.recordFeedback(line)
+	}
+	if err := scanner.Err(); err != nil {
+		select {
+		case <-stop:
+		default:
+			slog.Warn("serial feedback read failed", "error", err)
+		}
 	}
 }
 

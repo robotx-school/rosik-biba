@@ -74,3 +74,20 @@ Camera media is not sent through the control WebSocket. The agent publishes a VP
 - Use the same non-empty `BIBIKA_AGENT_TOKEN` on both processes.
 - Put the public server behind TLS; the browser automatically selects `wss://` when loaded through HTTPS.
 - The current UI has no user authentication. Do not expose it to untrusted networks until browser authentication and per-robot authorization are added.
+
+
+## Motor power relay
+
+The **Toggle motor power** button sends `{ "type": "power_pulse" }` over the existing control WebSocket. The server forwards it to the robot agent, which writes one `POWER_PULSE` serial line. The motor ESP32 pulses configurable GPIO25 active high for 500ms, then releases it. The same physical pulse toggles enable or disable; neither the browser nor ESP32 knows the actual power state.
+
+The button is disabled while disconnected or awaiting a pulse/cooldown. It displays firmware confirmation and reports missing/uncertain outcomes without retrying. Driver status includes `powerStatus`; immediate request results use `power_result`. Reloading or reconnecting never requests a pulse. Existing motor firmware without relay support will not confirm a pulse.
+
+Build the updated server and agent and compile the motor firmware before deployment. See [relay wiring and polarity](../firmware/README.md#motor-power-relay). No relay is operated by the automated checks:
+
+```sh
+go test -race ./...
+node frontend_power_test.cjs
+../firmware/motor/tests/run.sh
+```
+
+On serial failure, the agent immediately marks the device offline and clears pending pulses. It quarantines the port until driver cleanup finishes; reconnect USB if kernel cleanup remains stuck. Idle serial timeouts do not stop the feedback reader, and retired readers cannot overwrite offline relay status.

@@ -2,7 +2,7 @@
 
 ## Robot boards
 
-1. `motor/esp32_dual_hover_uart/`: byte-for-byte copy from `~/hoverboard-modify`. USB serial remains `linear_m_s angular_rad_s\n` at 115200 baud. Its original UART pins, wheel directions and watchdog remain intact.
+1. `motor/esp32_dual_hover_uart/`: imported from `~/hoverboard-modify`, extended with a momentary power relay. USB motion serial remains `linear_m_s angular_rad_s\n` at 115200 baud. Its original UART pins, wheel directions and watchdog remain intact. The external `~/hoverboard-modify` checkout is not modified.
 2. `manipulator/manipulator/`: combined FEETECH STS bus and local GyverStepper lift. No separate Arduino lift board or `Serial2` lift connection is needed.
 
 The sketches build for `esp32:esp32:esp32` with ESP32 Arduino core 3.3.12. Select the correct FQBN if your boards differ. This work does not flash either board.
@@ -18,6 +18,18 @@ HTTPS_PROXY=http://127.0.0.1:2080 HTTP_PROXY=http://127.0.0.1:2080 ./firmware/bu
 ```
 
 The script fetches pinned SCServo 1.0.2 and GyverStepper 2.7.3 revisions into ignored `firmware/.deps/` and compiles both sketches. It does not install global libraries or modify networking. `FQBN=... ./firmware/build.sh` selects another ESP32 board. The output binaries remain under `.deps/build/`.
+
+## Motor power relay
+
+The driver website's **Toggle motor power** button requests one 500ms pulse on the motor ESP32. Both enable and disable use the same pulse, emulating the existing momentary power switch. Actual on/off state is not sensed; pulse completion must not be interpreted as confirmation of motor power state.
+
+The GPIO defaults to **25**, active high. Configure `POWER_RELAY_PIN` and `POWER_RELAY_ACTIVE_HIGH` in `motor/esp32_dual_hover_uart/config.h` for your relay module. Connect the GPIO to the relay module's logic input and its contacts across the existing power switch circuit. The GPIO drives the module input, not a bare relay coil.
+
+The output starts inactive and never pulses automatically on boot or reconnect. An independent ESP timer task releases the relay after 500ms even if USB logging blocks. Duplicate requests during a pulse are ignored without extending it. Wheel targets are zeroed during the pulse; the UART watchdog continues running.
+
+Serial command: `POWER_PULSE\n` at 115200 baud, exact uppercase token. Firmware feedback is `RELAY READY`, `RELAY PULSE_STARTED`, `RELAY PULSE_DONE`, or `RELAY BUSY`. The Go agent emits each accepted request once, discards expired requests, limits repeated requests, and never retries a failed pulse write. Missing completion feedback is reported as unconfirmed.
+
+Use matching updated driver server, robot agent and motor firmware for the button. Compilation does not update deployed programs or flash the ESP32.
 
 ## Manipulator wiring
 
@@ -74,6 +86,8 @@ The combined implementation fixes upstream empty-payload command handling, the e
 
 ```sh
 ./firmware/manipulator/tests/run.sh
+./firmware/motor/tests/run.sh
+(cd driver && node frontend_power_test.cjs)
 (cd manipulator && go test -race ./...)
 (cd driver && go test ./...)
 ```

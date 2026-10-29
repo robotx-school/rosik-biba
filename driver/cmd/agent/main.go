@@ -95,6 +95,7 @@ func (a *agentClient) run() {
 }
 
 func (a *agentClient) connect() error {
+	defer a.ctrl.cancelPendingPower()
 	endpoint, err := url.Parse(a.config.serverURL)
 	if err != nil {
 		return err
@@ -120,11 +121,11 @@ func (a *agentClient) connect() error {
 	statusDone := make(chan struct{})
 	go func() {
 		defer close(statusDone)
-		ticker := time.NewTicker(time.Second)
+		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 		for range ticker.C {
 			status := a.ctrl.status()
-			if err := peer.send(protocol.Message{Type: "status", SerialConnected: status.serialConnected, LastFeedback: status.lastFeedback}); err != nil {
+			if err := peer.send(protocol.Message{Type: "status", SerialConnected: status.serialConnected, LastFeedback: status.lastFeedback, PowerStatus: status.powerStatus}); err != nil {
 				return
 			}
 		}
@@ -142,6 +143,11 @@ func (a *agentClient) connect() error {
 			heartbeat.mark()
 		case "control":
 			a.ctrl.set(message.Linear, message.Angular)
+		case "power_pulse":
+			state := a.ctrl.requestPowerPulse()
+			if err := peer.send(protocol.Message{Type: "power_result", PowerStatus: state}); err != nil {
+				return err
+			}
 		case "camera_publish_answer":
 			if err := a.camera.setAnswer(message); err != nil {
 				return err

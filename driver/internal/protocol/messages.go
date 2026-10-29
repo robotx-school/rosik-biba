@@ -10,6 +10,7 @@ type Message struct {
 
 	SerialConnected bool   `json:"serialConnected,omitempty"`
 	LastFeedback    string `json:"lastFeedback,omitempty"`
+	PowerStatus     string `json:"powerStatus,omitempty"`
 
 	SDP     string `json:"sdp,omitempty"`
 	SDPType string `json:"sdpType,omitempty"`

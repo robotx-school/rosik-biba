@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include "power_relay.h"
+#include <esp_timer.h>
 
 static constexpr uint32_t USB_BAUD = 115200;
 static constexpr uint32_t HOVER_BAUD = 115200;
@@ -59,6 +61,15 @@ struct FeedbackParser {
 static float targetLeftRpm = 0.0f;
 static float targetRightRpm = 0.0f;
 static String inputLine;
+static bool inputOverflow = false;
+static PowerRelay powerRelay;
+static esp_timer_handle_t powerRelayTimer;
+static std::atomic<bool> relayCompleted{false};
+
+static void powerRelayTimerTick(void *) {
+  // Keep the 500ms pulse bounded even if USB logging blocks the main loop.
+  if (powerRelay.tick(millis())) relayCompleted.store(true);
+}
 static uint32_t lastCommandMs = 0;
 static uint32_t lastSendMs = 0;
 static uint32_t lastReportMs = 0;
@@ -128,6 +139,18 @@ static void parseUsbCommandLine(String line) {
   line.trim();
   if (line.length() == 0) return;
 
+  if (line == "POWER_PULSE") {
+    if (!powerRelay.pulse(millis())) {
+      Serial.println("RELAY BUSY");
+      return;
+    }
+    targetLeftRpm = 0.0f;
+    targetRightRpm = 0.0f;
+    lastCommandMs = millis();
+    Serial.println("RELAY PULSE_STARTED");
+    return;
+  }
+
   char buffer[64];
   line.toCharArray(buffer, sizeof(buffer));
 
@@ -159,11 +182,13 @@ static void readUsbCommands() {
     char c = static_cast<char>(Serial.read());
     if (c == '\r') continue;
     if (c == '\n') {
-      parseUsbCommandLine(inputLine);
+      if (!inputOverflow) parseUsbCommandLine(inputLine);
       inputLine = "";
+      inputOverflow = false;
       continue;
     }
     if (inputLine.length() < 63) inputLine += c;
+    else inputOverflow = true;
   }
 }
 
@@ -184,13 +209,20 @@ static int16_t rightMotor2Rpm() {
 }
 
 void setup() {
+  powerRelay.begin();
+  esp_timer_create_args_t relayTimerArgs = {};
+  relayTimerArgs.callback = powerRelayTimerTick;
+  relayTimerArgs.name = "power-relay";
+  ESP_ERROR_CHECK(esp_timer_create(&relayTimerArgs, &powerRelayTimer));
+  ESP_ERROR_CHECK(esp_timer_start_periodic(powerRelayTimer, 1000));
   Serial.begin(USB_BAUD);
   HoverLeft.begin(HOVER_BAUD, SERIAL_8N1, BOARD_LEFT_RX_PIN, BOARD_LEFT_TX_PIN);
   HoverRight.begin(HOVER_BAUD, SERIAL_8N1, BOARD_RIGHT_RX_PIN, BOARD_RIGHT_TX_PIN);
   lastCommandMs = millis();
 
   Serial.println("ESP32 dual hoverboard UART bridge ready");
-  Serial.println("Send: <linear_m_s> <angular_rad_s>");
+  Serial.println("Send: <linear_m_s> <angular_rad_s> or POWER_PULSE");
+  Serial.println("RELAY READY");
 }
 
 void loop() {
@@ -200,7 +232,9 @@ void loop() {
   parseFeedback(HoverLeft, feedbackLeft);
   parseFeedback(HoverRight, feedbackRight);
 
-  if (now - lastCommandMs > COMMAND_TIMEOUT_MS) {
+  if (relayCompleted.exchange(false)) Serial.println("RELAY PULSE_DONE");
+
+  if (powerRelay.active() || now - lastCommandMs > COMMAND_TIMEOUT_MS) {
     targetLeftRpm = 0.0f;
     targetRightRpm = 0.0f;
   }

@@ -15,6 +15,7 @@ import (
 )
 
 const agentHeartbeatInterval = time.Second
+const agentStatusTimeout = 500 * time.Millisecond
 
 type socketPeer struct {
 	conn *websocket.Conn
@@ -29,9 +30,10 @@ func (p *socketPeer) send(message agentMessage) error {
 
 type agentSession struct {
 	*socketPeer
-	robotID string
-	status  robotStatus
-	camera  *webrtc.PeerConnection
+	robotID    string
+	status     robotStatus
+	lastStatus time.Time
+	camera     *webrtc.PeerConnection
 }
 
 type controlSession struct {
@@ -209,6 +211,7 @@ func (h *hub) handleAgentWS(ws *websocket.Conn) {
 	heartbeatDone := make(chan struct{})
 	defer close(heartbeatDone)
 	go h.sendAgentHeartbeats(session, heartbeatDone)
+	go h.watchAgentStatus(session, heartbeatDone)
 
 	for {
 		var message agentMessage
@@ -218,6 +221,8 @@ func (h *hub) handleAgentWS(ws *websocket.Conn) {
 		switch message.Type {
 		case "status", "heartbeat":
 			h.updateStatus(session, message)
+		case "power_result":
+			h.broadcastPowerResult(session.robotID, message.PowerStatus)
 		case "camera_publish_offer":
 			if err := h.acceptCameraPublisher(session, message); err != nil {
 				slog.Warn("camera publisher setup failed", "robot_id", session.robotID, "error", err)
@@ -311,11 +316,39 @@ func (h *hub) notifyCameraReset(robotID string) {
 }
 
 func (h *hub) updateStatus(session *agentSession, message agentMessage) {
-	status := robotStatus{Online: true, SerialConnected: message.SerialConnected, LastFeedback: message.LastFeedback}
+	status := robotStatus{Online: true, SerialConnected: message.SerialConnected, LastFeedback: message.LastFeedback, PowerStatus: message.PowerStatus}
 	h.mu.Lock()
+	if h.agents[session.robotID] != session {
+		h.mu.Unlock()
+		return
+	}
 	session.status = status
+	session.lastStatus = time.Now()
 	h.mu.Unlock()
 	h.broadcastStatus(session.robotID, status)
+}
+
+func (h *hub) watchAgentStatus(session *agentSession, done <-chan struct{}) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			h.mu.Lock()
+			stale := h.agents[session.robotID] == session && session.status.SerialConnected && !session.lastStatus.IsZero() && time.Since(session.lastStatus) >= agentStatusTimeout
+			if stale {
+				session.status.SerialConnected = false
+				session.status.PowerStatus = "offline"
+			}
+			status := session.status
+			h.mu.Unlock()
+			if stale {
+				h.broadcastStatus(session.robotID, status)
+			}
+		}
+	}
 }
 
 func (h *hub) broadcastStatus(robotID string, status robotStatus) {
@@ -328,7 +361,7 @@ func (h *hub) broadcastStatus(robotID string, status robotStatus) {
 	}
 	h.mu.Unlock()
 	for _, controller := range controllers {
-		if err := controller.send(agentMessage{Type: "status", RobotID: robotID, SerialConnected: status.SerialConnected, LastFeedback: status.LastFeedback}); err != nil {
+		if err := controller.send(agentMessage{Type: "status", RobotID: robotID, SerialConnected: status.SerialConnected, LastFeedback: status.LastFeedback, PowerStatus: status.PowerStatus}); err != nil {
 			_ = controller.conn.Close()
 		}
 	}
@@ -344,6 +377,10 @@ func (h *hub) handleControlWS(ws *websocket.Conn) {
 	h.mu.Lock()
 	h.controllers[session] = struct{}{}
 	agent := h.agents[robotID]
+	var initialStatus robotStatus
+	if agent != nil {
+		initialStatus = agent.status
+	}
 	h.mu.Unlock()
 	defer func() {
 		h.mu.Lock()
@@ -353,7 +390,7 @@ func (h *hub) handleControlWS(ws *websocket.Conn) {
 	}()
 
 	if agent != nil {
-		_ = session.send(agentMessage{Type: "status", RobotID: robotID, SerialConnected: agent.status.SerialConnected, LastFeedback: agent.status.LastFeedback})
+		_ = session.send(agentMessage{Type: "status", RobotID: robotID, SerialConnected: initialStatus.SerialConnected, LastFeedback: initialStatus.LastFeedback, PowerStatus: initialStatus.PowerStatus})
 	} else {
 		_ = session.send(agentMessage{Type: "status", RobotID: robotID})
 	}
@@ -363,16 +400,23 @@ func (h *hub) handleControlWS(ws *websocket.Conn) {
 		if err := websocket.JSON.Receive(ws, &command); err != nil {
 			return
 		}
-		if command.Type != "control" {
+		if command.Type != "control" && command.Type != "power_pulse" {
 			continue
 		}
 		h.mu.Lock()
 		agent = h.agents[robotID]
 		h.mu.Unlock()
 		if agent != nil {
-			if err := agent.send(agentMessage{Type: "control", Linear: command.Linear, Angular: command.Angular}); err != nil {
+			forward := agentMessage{Type: command.Type}
+			if command.Type == "control" {
+				forward.Linear = command.Linear
+				forward.Angular = command.Angular
+			}
+			if err := agent.send(forward); err != nil {
 				_ = agent.conn.Close()
 			}
+		} else if command.Type == "power_pulse" {
+			_ = session.send(agentMessage{Type: "power_result", PowerStatus: "offline"})
 		}
 	}
 }

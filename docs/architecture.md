@@ -48,3 +48,12 @@ No motion or homing starts on boot. Opening an ESP32 USB port can reset it, so G
 Firmware zero-length commands are handled immediately. Partial frames time out after a 100ms gap between bytes. Oversized frames are rejected and discarded. Commissioning operations that access flash are blocked while the lift is moving.
 
 The original operator reader firmware is included verbatim as a reference under `firmware/upstream/servo-control/esp_reader_low_level/`; it runs on an operator-side device if you use a physical master manipulator. The two ESP32 requirement refers to the robot itself. JSON input does not need an operator-side ESP32. Its button protocol is supported by the Go serial package; the stock forwarding command polls poses only and never maps buttons to robot driving or lift movement automatically.
+
+
+## Motor power pulse
+
+The driver control WebSocket also accepts `{"type":"power_pulse"}`. The server forwards this event once to its connected agent; the agent reports immediate `power_result` feedback and includes `powerStatus` in ordinary status updates. The camera signaling and media paths are unchanged.
+
+The motor agent serial writer owns both ordinary velocity lines and the exact `POWER_PULSE\n` command. Pending relay requests expire after 250ms, are cleared on disconnection, and are consumed before serial transmission. A failed or partial write has an uncertain physical outcome and is never replayed. Accepted requests are rate limited to one per two seconds, with a three-second frontend cooldown. Firmware feedback reports readiness, active pulse and completion; missing confirmation times out instead of claiming an on/off state.
+
+On the motor ESP32, GPIO25 defaults to active high for 500ms. Configuration lives in `firmware/motor/esp32_dual_hover_uart/config.h`. An independent timer turns the output inactive, while the main loop continues wheel watchdog/feedback work. The relay starts inactive and does not pulse on initialization or reconnection. The same pulse operates the hardware power switch in either direction; actual power state remains unknown.

@@ -12,6 +12,9 @@
     #joystick_handle{width:76px;height:76px;background:#95a5a6;border-radius:50%;position:absolute;top:calc(50% - 38px);left:calc(50% - 38px);cursor:grab;border:2px solid #bdc3c7;box-shadow:inset 0 0 10px rgba(0,0,0,.2)}
     .status{margin-top:8px;font-size:1em;background:#34495e;padding:8px 15px;border-radius:5px;box-shadow:0 0 10px rgba(0,0,0,.2);min-width:280px;text-align:center;font-variant-numeric:tabular-nums}
     .instructions{margin-bottom:16px;font-size:.9em;color:#bdc3c7;text-align:center}.online{color:#2ecc71}.offline{color:#e74c3c}
+    #power_button{display:block;width:100%;margin:10px 0;padding:12px;border:0;border-radius:6px;background:#d35400;color:#fff;font:600 1em Arial,sans-serif;cursor:pointer}
+    #power_button:disabled{opacity:.45;cursor:not-allowed}
+    #power_button:focus-visible{outline:3px solid #ecf0f1;outline-offset:3px}
     .gamepad-active #layout{display:flex;flex-direction:column;gap:14px;width:min(96vw,1400px)}
     .gamepad-active #joystick_container{display:none}
     .gamepad-active .camera{display:block;width:100%;order:1}
@@ -27,6 +30,8 @@
     <div class="controls">
       <div class="instructions">Управляйте роботом джойстиком или контроллером Steam Deck.</div>
       <div id="joystick_container"><div id="joystick_handle"></div></div>
+      <button id="power_button" type="button" disabled>Toggle motor power</button>
+      <div class="status" id="power_status" role="status" aria-live="polite">Power relay: unknown (on/off not sensed)</div>
       <div class="status" id="velocity">Linear: 0.00 m/s, Angular: 0.00 rad/s</div>
       <div class="status offline" id="control_status">Control WS: Offline</div>
       <div class="status offline" id="serial_status">ESP Serial: Offline</div>
@@ -49,6 +54,9 @@
     const gamepadStatus = document.getElementById('gamepad_status');
     const cameraStatus = document.getElementById('camera_status');
     const video = document.getElementById('camera');
+    const powerButton = document.getElementById('power_button');
+    const powerStatus = document.getElementById('power_status');
+    let relaySerialOnline=false,relayBusy=false,relayCooldown=false,relayCooldownTimer;
     let controlWS, cameraWS, pc, controlReconnectTimer, cameraReconnectTimer, cameraWatchdog, sendTimer, gamepadSendTimer, lastVideoTime=0, stalledVideoChecks=0, gamepadLayoutActive=false, gamepadLoopStarted=false, gamepadMoving=false;
     let dragging = false, linear = 0, angular = 0, rect = box.getBoundingClientRect();
     const center = box.offsetWidth / 2, handleRadius = knob.offsetWidth / 2, maxDisplacement = center - handleRadius;
@@ -58,6 +66,9 @@
     function showVelocity(){const text='Linear: '+linear.toFixed(2)+' m/s, Angular: '+angular.toFixed(2)+' rad/s';if(velocity.textContent!==text)velocity.textContent=text}
     function send(){if(controlWS&&controlWS.readyState===WebSocket.OPEN)controlWS.send(JSON.stringify({type:'control',linear,angular}))}
     function stop(){linear=0;angular=0;showVelocity();knob.style.left=(center-handleRadius)+'px';knob.style.top=(center-handleRadius)+'px';send()}
+    function updatePowerButton(){powerButton.disabled=!(controlWS&&controlWS.readyState===WebSocket.OPEN&&relaySerialOnline)||relayBusy||relayCooldown}
+    function showPowerStatus(state){const labels={unknown:'unknown (on/off not sensed)',ready:'ready (on/off not sensed)',pending:'pulse requested',sent:'pulse sent; awaiting ESP32',pulsing:'active for 500 ms',done:'pulse complete (on/off not sensed)',busy:'busy; please wait',offline:'offline (on/off not sensed)',expired:'request expired; no pulse sent',timeout:'no confirmation; check power before retrying',uncertain:'connection lost; check power before retrying'};relayBusy=['pending','sent','pulsing','busy'].includes(state);powerStatus.textContent='Power relay: '+(labels[state]||labels.unknown);updatePowerButton()}
+    powerButton.addEventListener('click',()=>{if(powerButton.disabled)return;stop();relayCooldown=true;showPowerStatus('pending');clearTimeout(relayCooldownTimer);try{controlWS.send(JSON.stringify({type:'power_pulse'}))}catch(error){showPowerStatus('uncertain')}relayCooldownTimer=setTimeout(()=>{relayCooldown=false;if(relayBusy)showPowerStatus('timeout');updatePowerButton()},3000)});
     function updateRect(){rect=box.getBoundingClientRect()}
     function coords(event){if(event.touches&&event.touches.length>0)return{clientX:event.touches[0].clientX,clientY:event.touches[0].clientY};return{clientX:event.clientX,clientY:event.clientY}}
     function updateJoystick(event){if(!dragging)return;const c=coords(event);let dx=c.clientX-rect.left-center,dy=c.clientY-rect.top-center;const distance=Math.sqrt(dx*dx+dy*dy);if(distance>maxDisplacement){dx=dx/distance*maxDisplacement;dy=dy/distance*maxDisplacement}knob.style.left=(center+dx-handleRadius)+'px';knob.style.top=(center+dy-handleRadius)+'px';linear=-(dy/maxDisplacement)*LINEAR_LIMIT;angular=-(dx/maxDisplacement)*ANGULAR_LIMIT;showVelocity()}
@@ -71,7 +82,7 @@
     window.addEventListener('gamepadconnected',()=>{});
     window.addEventListener('gamepaddisconnected',()=>{if(!Array.from(navigator.getGamepads?navigator.getGamepads():[]).some(p=>p&&p.connected)){document.body.classList.remove('gamepad-active');clearInterval(gamepadSendTimer);gamepadSendTimer=null;stop()}});
     const wsScheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
-    function connectControl(){clearTimeout(controlReconnectTimer);controlWS=new WebSocket(wsScheme+location.host+'/ws/control?robotId='+encodeURIComponent(ROBOT_ID));controlWS.onopen=()=>{status(controlStatus,'Control WS: Online',true);stop()};controlWS.onclose=()=>{status(controlStatus,'Control WS: Offline',false);status(serialStatus,'ESP Serial: Unknown',false);controlReconnectTimer=setTimeout(connectControl,800)};controlWS.onerror=()=>controlWS.close();controlWS.onmessage=e=>{const s=JSON.parse(e.data);status(serialStatus,'ESP Serial: '+(s.serialConnected?'Online':'Offline'),s.serialConnected)}}
+    function connectControl(){clearTimeout(controlReconnectTimer);controlWS=new WebSocket(wsScheme+location.host+'/ws/control?robotId='+encodeURIComponent(ROBOT_ID));controlWS.onopen=()=>{status(controlStatus,'Control WS: Online',true);stop()};controlWS.onclose=()=>{status(controlStatus,'Control WS: Offline',false);status(serialStatus,'ESP Serial: Unknown',false);relaySerialOnline=false;showPowerStatus('offline');controlReconnectTimer=setTimeout(connectControl,800)};controlWS.onerror=()=>controlWS.close();controlWS.onmessage=e=>{const s=JSON.parse(e.data);if(s.type==='power_result'){showPowerStatus(s.powerStatus);return}if(s.type!=='status')return;relaySerialOnline=!!s.serialConnected;status(serialStatus,'ESP Serial: '+(s.serialConnected?'Online':'Offline'),s.serialConnected);if(s.powerStatus)showPowerStatus(s.powerStatus);else updatePowerButton()}}
     async function waitForIceComplete(connection){if(connection.iceGatheringState==='complete')return;await Promise.race([new Promise(resolve=>{const check=()=>{if(connection.iceGatheringState==='complete'){connection.removeEventListener('icegatheringstatechange',check);resolve()}};connection.addEventListener('icegatheringstatechange',check)}),new Promise(resolve=>setTimeout(resolve,1500))])}
     function stopCameraWatchdog(){clearInterval(cameraWatchdog);cameraWatchdog=null}
     function scheduleCameraReconnect(){clearTimeout(cameraReconnectTimer);cameraReconnectTimer=setTimeout(connectCamera,1500)}

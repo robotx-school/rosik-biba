@@ -8,4 +8,5 @@ type robotStatus struct {
 	Online          bool   `json:"online"`
 	SerialConnected bool   `json:"serialConnected"`
 	LastFeedback    string `json:"lastFeedback"`
+	PowerStatus     string `json:"powerStatus"`
 }
